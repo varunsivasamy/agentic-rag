@@ -1,7 +1,7 @@
-# Hugging Face Spaces App for Agentic RAG
+"""
+Agentic RAG App for Hugging Face Spaces (Gradio SDK).
 
-This version uses Hugging Face models directly for cloud deployment.
-
+Uses Hugging Face models directly for cloud deployment.
 """
 
 import os
@@ -11,9 +11,10 @@ import tempfile
 import hashlib
 from typing import Any, List, Optional
 
-import streamlit as st
+import gradio as gr
+from huggingface_hub import InferenceClient
 
-# Import LangChain with Hugging Face
+# LangChain imports
 from langchain_huggingface import HuggingFaceEmbeddings, ChatHuggingFace
 from langchain_chroma import Chroma
 from langchain_community.document_loaders import PyPDFLoader
@@ -36,9 +37,9 @@ CHROMA_DIR = "./chroma_db"
 COLLECTION_NAME = "pdf_documents"
 
 # Hugging Face models for cloud deployment
-# Using lightweight models suitable for HF Spaces
 LLM_MODEL_NAME = "google/gemma-2-2b-it"
 EMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+
 
 # =============================================================================
 # SAFE CALCULATOR TOOL
@@ -102,7 +103,6 @@ class RAGEngine:
         self.thread_id = None
         self.embeddings = None
         self.pdf_filename = None
-        self.llm = None
 
     def index_pdf(self, pdf_path: str, pdf_filename: str):
         """Index a PDF document."""
@@ -143,14 +143,14 @@ class RAGEngine:
         self.tools = [retriever_tool, calculator]
 
         # Create agent using ChatHuggingFace
-        self.llm = ChatHuggingFace(
+        llm = ChatHuggingFace(
             llm=self._create_llm(),
             tokenizer_name=LLM_MODEL_NAME,
         )
 
         checkpointer = InMemorySaver()
         self.agent = create_agent(
-            model=self.llm,
+            model=llm,
             tools=self.tools,
             system_prompt=self._get_system_prompt(),
             checkpointer=checkpointer,
@@ -267,174 +267,131 @@ Rules:
         self.thread_id = None
 
 
+# Global RAG engine instance
+rag_engine = None
+
+
+def process_pdf(file):
+    """Process uploaded PDF and build embeddings."""
+    global rag_engine
+
+    if file is None:
+        return "Please upload a PDF file."
+
+    try:
+        # Save uploaded file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
+            temp_file.write(file.name.encode() if isinstance(file.name, str) else file.name)
+            temp_path = temp_file.name
+
+        # Actually write the file content
+        with open(temp_path, "wb") as f:
+            if hasattr(file, 'read'):
+                f.write(file.read())
+            else:
+                f.write(file)
+
+        # Initialize RAG engine
+        rag = RAGEngine()
+        num_chunks = rag.index_pdf(temp_path, os.path.basename(temp_path))
+
+        global rag_engine
+        rag_engine = rag
+
+        # Clean up temp file
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+        return f"✅ {os.path.basename(temp_path)} loaded! ({num_chunks} chunks)\n\nModel: {LLM_MODEL_NAME}\nEmbeddings: {EMBED_MODEL_NAME}"
+
+    except Exception as exc:
+        return f"Error processing PDF: {exc}"
+
+
+def chat(message, history):
+    """Handle chat interaction."""
+    global rag_engine
+
+    if rag_engine is None:
+        return "Please upload a PDF document first."
+
+    try:
+        response = rag_engine.query(message)
+        return response["reply"]
+    except Exception as exc:
+        return f"Error: {exc}"
+
+
+def clear_conversation():
+    """Clear conversation memory."""
+    global rag_engine
+    if rag_engine:
+        rag_engine.clear_memory()
+    return []
+
+
 # =============================================================================
-# STREAMLIT UI
+# GRADIO UI
 # =============================================================================
 
-st.set_page_config(
-    page_title="Agentic RAG Chat",
-    page_icon="📚",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+with gr.Blocks(theme="soft", title="Agentic RAG Chat") as demo:
+    gr.Markdown("# 📚 Agentic RAG Chat")
+    gr.Markdown("Chat with your PDF documents using an agentic RAG pipeline on Hugging Face Spaces.")
 
-# Custom CSS
-st.markdown("""
-    <style>
-    .main-header { font-size: 2rem; font-weight: bold; color: #1a1a2e; margin-bottom: 0.5rem; }
-    .sub-header { font-size: 1rem; color: #666; margin-bottom: 1.5rem; }
-    .message-user { background-color: #e3f2fd; padding: 1rem; border-radius: 0.5rem; margin-bottom: 0.5rem; }
-    .message-assistant { background-color: #f5f5f5; padding: 1rem; border-radius: 0.5rem; margin-bottom: 0.5rem; }
-    .tool-call { background-color: #fff3e0; padding: 0.75rem; border-radius: 0.375rem; margin: 0.5rem 0; border-left: 4px solid #ff9800; }
-    .context-box { background-color: #e8f5e9; padding: 0.75rem; border-radius: 0.375rem; margin: 0.5rem 0; font-size: 0.85rem; font-family: monospace; }
-    </style>
-""", unsafe_allow_html=True)
+    with gr.Row():
+        with gr.Column(scale=1):
+            gr.Markdown("## Configuration")
+            pdf_upload = gr.File(
+                label="Upload a PDF file",
+                file_types=[".pdf"],
+                height=100
+            )
+            process_btn = gr.Button("Process PDF", variant="primary")
+            clear_btn = gr.Button("Clear conversation", variant="secondary")
 
+            gr.Markdown("### About")
+            gr.Markdown("""
+            - **Agentic workflow** — LLM decides when to retrieve vs calculate
+            - **Cloud-based** — Runs on Hugging Face Spaces
+            - **Models** — Uses Hugging Face inference API
+            """)
 
-def init_session_state():
-    """Initialize session state."""
-    if "rag_engine" not in st.session_state:
-        st.session_state.rag_engine = None
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    if "pdf_hash" not in st.session_state:
-        st.session_state.pdf_hash = None
-    if "pdf_loaded" not in st.session_state:
-        st.session_state.pdf_loaded = False
+        with gr.Column(scale=2):
+            gr.Markdown("## Chat")
+            chatbot = gr.Chatbot(height=500)
+            msg = gr.Textbox(label="Ask a question...", placeholder="Type your question here...")
+            send_btn = gr.Button("Send", variant="primary")
 
+    # State for chat history
+    chat_history = gr.State([])
 
-def render_chat_message(role: str, content: str, tools: list = None, context: list = None):
-    """Render a chat message."""
-    css_class = "message-user" if role == "user" else "message-assistant"
+    # Event handlers
+    process_btn.click(
+        fn=process_pdf,
+        inputs=pdf_upload,
+        outputs=gr.Textbox(label="Status")
+    )
 
-    with st.container():
-        st.markdown(f'<div class="{css_class}">{content}</div>', unsafe_allow_html=True)
+    send_btn.click(
+        fn=chat,
+        inputs=[msg, chat_history],
+        outputs=chatbot
+    ).then(
+        fn=lambda: "",
+        outputs=msg
+    )
 
-        if tools:
-            for tool_name in tools:
-                st.markdown(f'<div class="tool-call">Tool used: {tool_name}</div>', unsafe_allow_html=True)
+    clear_btn.click(
+        fn=clear_conversation,
+        outputs=chatbot
+    )
 
-        if context:
-            st.markdown('<div class="context-box"><strong>Retrieved Context:</strong></div>', unsafe_allow_html=True)
-            for ctx in context:
-                st.text(ctx)
-
-
-def main():
-    """Main Streamlit application."""
-    init_session_state()
-
-    st.markdown('<div class="main-header">Agentic RAG Chat</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">Chat with your PDF documents using an agentic RAG pipeline on Hugging Face</div>', unsafe_allow_html=True)
-
-    # Sidebar
-    with st.sidebar:
-        st.header("Configuration")
-
-        # PDF Upload
-        st.subheader("Document")
-        uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"])
-
-        if uploaded_file is not None:
-            current_hash = hashlib.sha256(uploaded_file.getvalue()).hexdigest()
-
-            if current_hash != st.session_state.pdf_hash:
-                with st.spinner("Processing PDF and building embeddings (using Hugging Face models)..."):
-                    try:
-                        # Save uploaded file
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
-                            temp_file.write(uploaded_file.getvalue())
-                            temp_path = temp_file.name
-
-                        # Initialize RAG engine
-                        rag = RAGEngine()
-                        num_chunks = rag.index_pdf(temp_path, uploaded_file.name)
-
-                        st.session_state.rag_engine = rag
-                        st.session_state.pdf_hash = current_hash
-                        st.session_state.pdf_loaded = True
-                        st.success(f"✅ {uploaded_file.name} loaded! ({num_chunks} chunks)")
-                        st.info(f"Using model: {LLM_MODEL_NAME} | Embeddings: {EMBED_MODEL_NAME}")
-
-                        # Clean up temp file
-                        if os.path.exists(temp_path):
-                            os.unlink(temp_path)
-
-                    except Exception as exc:
-                        st.error(f"Error processing PDF: {exc}")
-                        import traceback
-                        st.exception(exc)
-
-        # Settings
-        st.subheader("Settings")
-        show_tool_calls = st.toggle("Show tool calls", value=True)
-        show_context = st.toggle("Show retrieved context", value=True)
-
-        # Clear conversation
-        if st.session_state.messages:
-            if st.button("Clear conversation"):
-                if st.session_state.rag_engine:
-                    st.session_state.rag_engine.clear_memory()
-                st.session_state.messages = []
-                st.rerun()
-
-        # Info
-        st.divider()
-        st.subheader("About")
-        st.markdown("""
-        - **Agentic workflow** — LLM decides when to retrieve vs calculate
-        - **Cloud-based** — Runs on Hugging Face Spaces
-        - **Models** — Uses Hugging Face inference API
-        """)
-
-    # Main chat area
-    st.divider()
-
-    # Display messages
-    for msg in st.session_state.messages:
-        render_chat_message(
-            msg["role"],
-            msg["content"],
-            msg.get("tools") if show_tool_calls else None,
-            msg.get("context") if show_context else None
-        )
-
-    # Chat input
-    if not st.session_state.pdf_loaded:
-        st.info("Upload a PDF document to begin chatting.")
-
-    else:
-        if prompt := st.chat_input("Ask a question about your document...", disabled=not st.session_state.pdf_loaded):
-            # Add user message
-            st.session_state.messages.append({"role": "user", "content": prompt})
-            render_chat_message("user", prompt)
-
-            # Call agent
-            with st.spinner("Thinking..."):
-                try:
-                    rag = st.session_state.rag_engine
-                    response = rag.query(prompt)
-
-                    # Add assistant message
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": response["reply"],
-                        "tools": response["tools_used"] if show_tool_calls else None,
-                        "context": response["retrieved_context"] if show_context else None,
-                    })
-
-                    render_chat_message(
-                        "assistant",
-                        response["reply"],
-                        response["tools_used"] if show_tool_calls else None,
-                        response["retrieved_context"] if show_context else None
-                    )
-
-                except Exception as exc:
-                    st.error(f"Error generating response: {exc}")
-                    import traceback
-                    st.exception(exc)
+    # Example
+    gr.Examples(
+        examples=["What is the main topic of this document?", "Summarize the key points"],
+        inputs=msg
+    )
 
 
 if __name__ == "__main__":
-    main()
+    demo.launch()
