@@ -1,7 +1,7 @@
-# Hugging Face Spaces App for Agentic RAG
+"""
+Hugging Face Spaces App for Agentic RAG.
 
-This version uses Hugging Face models directly for cloud deployment.
-
+This version uses Hugging Face models instead of Ollama for cloud deployment.
 """
 
 import os
@@ -12,17 +12,23 @@ import hashlib
 from typing import Any, List, Optional
 
 import streamlit as st
+from huggingface_hub import InferenceClient
 
-# Import LangChain with Hugging Face
-from langchain_huggingface import HuggingFaceEmbeddings, ChatHuggingFace
-from langchain_chroma import Chroma
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_core.messages import AIMessage, ToolMessage
-from langchain_core.tools import create_retriever_tool
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langgraph.checkpoint.memory import InMemorySaver
-from langchain.agents import create_agent
-from langchain.tools import tool
+# Try to import HF integrations
+try:
+    from langchain_huggingface import HuggingFaceEmbeddings, ChatHuggingFace
+    from langchain_chroma import Chroma
+    from langchain_community.document_loaders import PyPDFLoader
+    from langchain_core.messages import AIMessage, ToolMessage
+    from langchain_core.tools import create_retriever_tool
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langchain.agents import create_agent
+    from langchain.tools import tool
+    HF_AVAILABLE = True
+except ImportError:
+    HF_AVAILABLE = False
+
 import ast
 import operator
 
@@ -36,8 +42,7 @@ CHROMA_DIR = "./chroma_db"
 COLLECTION_NAME = "pdf_documents"
 
 # Hugging Face models for cloud deployment
-# Using lightweight models suitable for HF Spaces
-LLM_MODEL_NAME = "google/gemma-2-2b-it"
+LLM_MODEL_NAME = "google/gemma-2-2b-it"  # Lightweight, good for inference
 EMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
 # =============================================================================
@@ -102,7 +107,6 @@ class RAGEngine:
         self.thread_id = None
         self.embeddings = None
         self.pdf_filename = None
-        self.llm = None
 
     def index_pdf(self, pdf_path: str, pdf_filename: str):
         """Index a PDF document."""
@@ -119,7 +123,7 @@ class RAGEngine:
         # Create embeddings
         self.embeddings = HuggingFaceEmbeddings(model_name=EMBED_MODEL_NAME)
 
-        # Build vector store (in-memory for HF Spaces)
+        # Build vector store
         self.vectorstore = Chroma.from_documents(
             documents=chunks,
             embedding=self.embeddings,
@@ -142,36 +146,23 @@ class RAGEngine:
         )
         self.tools = [retriever_tool, calculator]
 
-        # Create agent using ChatHuggingFace
-        self.llm = ChatHuggingFace(
-            llm=self._create_llm(),
-            tokenizer_name=LLM_MODEL_NAME,
-        )
-
-        checkpointer = InMemorySaver()
-        self.agent = create_agent(
-            model=self.llm,
-            tools=self.tools,
-            system_prompt=self._get_system_prompt(),
-            checkpointer=checkpointer,
-        )
+        # Create agent
+        llm_client = InferenceClient(model=LLM_MODEL_NAME)
+        self.agent = self._create_agent(self.tools)
 
         self.pdf_filename = pdf_filename
         return len(chunks)
 
-    def _create_llm(self):
-        """Create Hugging Face LLM for agent."""
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-        import torch
-
-        tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL_NAME)
-        model = AutoModelForCausalLM.from_pretrained(
-            LLM_MODEL_NAME,
-            torch_dtype=torch.float16,
-            device_map="auto",
-            trust_remote_code=True,
+    def _create_agent(self, tools: List):
+        """Create a LangChain agent."""
+        checkpointer = InMemorySaver()
+        agent = create_agent(
+            model=None,  # Will be set later
+            tools=tools,
+            system_prompt=self._get_system_prompt(),
+            checkpointer=checkpointer,
         )
-        return model
+        return agent
 
     def _get_system_prompt(self) -> str:
         return """You are an intelligent document assistant.

@@ -2,10 +2,8 @@
 langchain==0.3.0
 langchain-chroma==0.1.2
 langchain-community==0.3.0
-langchain-ollama==0.1.0
 langchain-text-splitters==0.3.0
 langgraph==0.2.22
-langgraph-checkpoint==1.0.5
 
 # Vector store
 chromadb==0.5.3
@@ -13,21 +11,15 @@ chromadb==0.5.3
 # PDF processing
 pypdf==4.2.0
 
-# Embeddings
-sentence-transformers==2.7.0
-
-# LLM integrations
+# Hugging Face models and embeddings
 transformers==4.42.0
 torch==2.3.0
+sentence-transformers==2.7.0
+langchain-huggingface==0.1.0
+huggingface-hub==0.24.0
 
 # Web frontend
 streamlit==1.59.1
 
 # Utilities
 python-dotenv==1.0.1
-
-# Ollama support (for local deployment)
-ollama==0.2.0
-
-# Hugging Face support (for cloud deployment)
-langchain-huggingface==0.1.0
