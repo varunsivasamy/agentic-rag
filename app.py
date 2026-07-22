@@ -36,6 +36,10 @@ CHUNK_OVERLAP = 200
 CHROMA_DIR = "./chroma_db"
 COLLECTION_NAME = "pdf_documents"
 
+# Fixed employee handbook PDF
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PDF_PATH = os.path.join(SCRIPT_DIR, "Company_Employee_Handbook.pdf")
+
 # Hugging Face models for cloud deployment
 LLM_MODEL_NAME = "google/gemma-2-2b-it"
 EMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
@@ -174,25 +178,22 @@ class RAGEngine:
         return model
 
     def _get_system_prompt(self) -> str:
-        return """You are an intelligent document assistant.
+        return """You are an intelligent HR assistant for the company employee handbook.
 
-The user's PDF is ALREADY uploaded and indexed in the vector database.
-You do NOT need to ask the user to upload any file.
+The Company Employee Handbook is ALREADY indexed and available. Do NOT ask the user to upload anything.
 
 You have access to two tools:
 
-1. document_retriever — searches the indexed PDF for relevant passages
-2. calculator — performs math calculations
+1. document_retriever — searches the employee handbook for relevant policies and information
+2. calculator — performs math calculations (e.g. leave balances, salary calculations)
 
 Rules:
 
-* Always determine the user's intent first.
-* For ANY question about the document, PDF, or its contents, you MUST call document_retriever FIRST before answering.
-* Use calculator for mathematical operations.
-* Never hallucinate. Only answer document questions using retrieved context.
-* If information is unavailable in the retrieved context, clearly say so.
-* Never tell the user to upload a file — the document is already available via document_retriever.
-* Keep responses concise and accurate."""
+* For ANY question about policies, benefits, leave, roles, or company rules, call document_retriever FIRST.
+* Use calculator for any numerical computations.
+* Never hallucinate. Only answer using retrieved handbook content.
+* If information is not found in the handbook, clearly say so.
+* Keep responses concise, accurate, and professional."""
 
     def query(self, question: str) -> dict:
         """Query the agent with a question."""
@@ -267,45 +268,19 @@ Rules:
         self.thread_id = None
 
 
-# Global RAG engine instance
+# Global RAG engine instance - auto-load employee handbook on startup
 rag_engine = None
 
-
-def process_pdf(file):
-    """Process uploaded PDF and build embeddings."""
+def initialize_rag():
+    """Initialize RAG engine with the employee handbook on startup."""
     global rag_engine
-
-    if file is None:
-        return "Please upload a PDF file."
-
     try:
-        # Save uploaded file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
-            temp_file.write(file.name.encode() if isinstance(file.name, str) else file.name)
-            temp_path = temp_file.name
-
-        # Actually write the file content
-        with open(temp_path, "wb") as f:
-            if hasattr(file, 'read'):
-                f.write(file.read())
-            else:
-                f.write(file)
-
-        # Initialize RAG engine
         rag = RAGEngine()
-        num_chunks = rag.index_pdf(temp_path, os.path.basename(temp_path))
-
-        global rag_engine
+        rag.index_pdf(PDF_PATH, "Company_Employee_Handbook.pdf")
         rag_engine = rag
-
-        # Clean up temp file
-        if os.path.exists(temp_path):
-            os.unlink(temp_path)
-
-        return f"✅ {os.path.basename(temp_path)} loaded! ({num_chunks} chunks)\n\nModel: {LLM_MODEL_NAME}\nEmbeddings: {EMBED_MODEL_NAME}"
-
+        print("✅ Employee Handbook loaded and indexed successfully.")
     except Exception as exc:
-        return f"Error processing PDF: {exc}"
+        print(f"Error loading handbook: {exc}")
 
 
 def chat(message, history):
@@ -334,43 +309,27 @@ def clear_conversation():
 # GRADIO UI
 # =============================================================================
 
-with gr.Blocks(theme="soft", title="Agentic RAG Chat") as demo:
-    gr.Markdown("# 📚 Agentic RAG Chat")
-    gr.Markdown("Chat with your PDF documents using an agentic RAG pipeline on Hugging Face Spaces.")
+with gr.Blocks(theme="soft", title="Employee Handbook Assistant") as demo:
+    gr.Markdown("# 🏢 Employee Handbook Assistant")
+    gr.Markdown("Ask questions about company policies, benefits, leave, roles, and more — powered by the Company Employee Handbook.")
 
     with gr.Row():
         with gr.Column(scale=1):
-            gr.Markdown("## Configuration")
-            pdf_upload = gr.File(
-                label="Upload a PDF file",
-                file_types=[".pdf"],
-                height=100
-            )
-            process_btn = gr.Button("Process PDF", variant="primary")
-            clear_btn = gr.Button("Clear conversation", variant="secondary")
-
-            gr.Markdown("### About")
+            gr.Markdown("## About")
             gr.Markdown("""
+            - **Private data extraction** — Queries internal company handbook
             - **Agentic workflow** — LLM decides when to retrieve vs calculate
-            - **Cloud-based** — Runs on Hugging Face Spaces
-            - **Models** — Uses Hugging Face inference API
+            - **No hallucination** — Answers grounded in handbook content only
             """)
+            clear_btn = gr.Button("Clear conversation", variant="secondary")
 
         with gr.Column(scale=2):
             gr.Markdown("## Chat")
             chatbot = gr.Chatbot(height=500)
-            msg = gr.Textbox(label="Ask a question...", placeholder="Type your question here...")
+            msg = gr.Textbox(label="Ask about company policies...", placeholder="e.g. What is the leave policy?")
             send_btn = gr.Button("Send", variant="primary")
 
-    # State for chat history
     chat_history = gr.State([])
-
-    # Event handlers
-    process_btn.click(
-        fn=process_pdf,
-        inputs=pdf_upload,
-        outputs=gr.Textbox(label="Status")
-    )
 
     send_btn.click(
         fn=chat,
@@ -386,12 +345,17 @@ with gr.Blocks(theme="soft", title="Agentic RAG Chat") as demo:
         outputs=chatbot
     )
 
-    # Example
     gr.Examples(
-        examples=["What is the main topic of this document?", "Summarize the key points"],
+        examples=[
+            "What is the leave policy?",
+            "What are the employee benefits?",
+            "What is the code of conduct?",
+            "How many days of annual leave do employees get?",
+        ],
         inputs=msg
     )
 
 
 if __name__ == "__main__":
+    initialize_rag()
     demo.launch()
