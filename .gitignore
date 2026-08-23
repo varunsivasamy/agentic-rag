@@ -3,3 +3,6 @@ __pycache__/
 chroma_db/
 *.pyc
 .env
+chat_history.db
+frontend/node_modules/
+frontend/dist/

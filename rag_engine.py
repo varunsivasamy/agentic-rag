@@ -1,8 +1,11 @@
 """
-LangChain ReAct Agent — decides at each turn whether to:
-  1. Use document_retriever (RAG) for company policy questions
-  2. Use calculator for math
-  3. Answer directly from LLM for general conversation
+LangChain Agent with Groq LLM.
+
+Uses LangChain's bind_tools + tool-calling chain — no LangGraph.
+The LLM decides at each turn:
+  1. Call document_retriever  -> answer from company PDFs
+  2. Call calculator           -> math
+  3. Answer directly           -> general conversation
 """
 
 import ast
@@ -13,63 +16,77 @@ import os
 import shutil
 from typing import Any
 
-from langchain.agents import create_agent
-from langchain.tools import tool
+from dotenv import load_dotenv
+from langchain_groq import ChatGroq
 from langchain_chroma import Chroma
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_core.messages import AIMessage, ToolMessage
-from langchain_core.tools import create_retriever_tool
-from langchain_ollama import ChatOllama, OllamaEmbeddings
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import tool, create_retriever_tool
+from langchain_ollama import OllamaEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langgraph.checkpoint.memory import InMemorySaver
 
 logger = logging.getLogger("rag_engine")
+
+load_dotenv()  # loads GROQ_API_KEY from .env
 
 # =============================================================================
 # CONFIG
 # =============================================================================
 
-CHUNK_SIZE = 1000
+GROQ_API_KEY   = os.environ["GROQ_API_KEY"]
+GROQ_LLM_MODEL = "llama3-70b-8192"
+
+EMBED_MODEL  = "nomic-embed-text"     # still local via Ollama
+CHUNK_SIZE   = 1000
 CHUNK_OVERLAP = 200
-CHROMA_DIR = "./chroma_db"
-COLLECTION_NAME = "company_docs"
-INDEX_META_FILE = os.path.join(CHROMA_DIR, "index_meta.json")
-PDF_FOLDER = "./pdf"
+CHROMA_DIR   = "./chroma_db"
+COLLECTION   = "company_docs"
+INDEX_META   = os.path.join(CHROMA_DIR, "index_meta.json")
+PDF_FOLDER   = "./pdf"
+MMR_K        = 5
+MMR_FETCH_K  = 20
 
-OLLAMA_LLM_MODEL = "qwen2.5:1.5b"
-OLLAMA_EMBED_MODEL = "nomic-embed-text"
-LLM_TEMPERATURE = 0.2
-MMR_K = 5
-MMR_FETCH_K = 20
+SYSTEM_PROMPT = """You are a knowledgeable company assistant. You have been given access to all the company's internal documents — HR policies, code of conduct, IT & data security, health & safety, travel, communications, branding, and more.
+
+Treat the documents as if the user handed them to you directly. Use them to answer ANY company-related question.
+
+You have two tools:
+1. document_retriever — searches ALL company documents. Use for any company or policy question.
+2. calculator — math calculations.
+
+Rules:
+- Company question? → call document_retriever first, then answer using the retrieved content.
+- Math? → use calculator.
+- Casual chat / greeting? → answer directly, no tool needed.
+- Never make up company information. If the docs don't contain it, say so.
+- Always tell the user which document your answer came from."""
 
 
 # =============================================================================
-# SAFE CALCULATOR TOOL
+# SAFE CALCULATOR
 # =============================================================================
 
-_SAFE_OPS = {
+_OPS = {
     ast.Add: operator.add, ast.Sub: operator.sub,
     ast.Mult: operator.mul, ast.Div: operator.truediv,
     ast.Pow: operator.pow, ast.USub: operator.neg, ast.UAdd: operator.pos,
 }
 
-
-def _eval_node(node: ast.AST) -> float:
+def _eval(node: ast.AST) -> float:
     if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
         return float(node.value)
-    if isinstance(node, ast.UnaryOp) and type(node.op) in _SAFE_OPS:
-        return _SAFE_OPS[type(node.op)](_eval_node(node.operand))
-    if isinstance(node, ast.BinOp) and type(node.op) in _SAFE_OPS:
-        return _SAFE_OPS[type(node.op)](_eval_node(node.left), _eval_node(node.right))
+    if isinstance(node, ast.UnaryOp) and type(node.op) in _OPS:
+        return _OPS[type(node.op)](_eval(node.operand))
+    if isinstance(node, ast.BinOp) and type(node.op) in _OPS:
+        return _OPS[type(node.op)](_eval(node.left), _eval(node.right))
     raise ValueError(f"Unsupported: {ast.dump(node)}")
-
 
 @tool
 def calculator(expression: str) -> str:
-    """Perform safe math calculations. Input must be a valid math expression like '10 * 3 + 5'."""
+    """Evaluate a math expression like '10 * 3 + 5'."""
     try:
-        result = _eval_node(ast.parse(expression.strip(), mode="eval").body)
-        return str(int(result)) if result == int(result) else str(result)
+        r = _eval(ast.parse(expression.strip(), mode="eval").body)
+        return str(int(r)) if r == int(r) else str(r)
     except ZeroDivisionError:
         return "Error: Division by zero."
     except Exception as e:
@@ -80,180 +97,173 @@ def calculator(expression: str) -> str:
 # PDF INGESTION
 # =============================================================================
 
-def _get_pdf_files() -> list[str]:
+def _pdf_files() -> list[str]:
     if not os.path.isdir(PDF_FOLDER):
         raise RuntimeError(f"PDF folder not found: {PDF_FOLDER}")
-    pdfs = [
-        os.path.join(PDF_FOLDER, f)
-        for f in os.listdir(PDF_FOLDER) if f.lower().endswith(".pdf")
-    ]
-    if not pdfs:
-        raise RuntimeError(f"No PDFs found in {PDF_FOLDER}")
-    return pdfs
+    files = [os.path.join(PDF_FOLDER, f)
+             for f in os.listdir(PDF_FOLDER) if f.lower().endswith(".pdf")]
+    if not files:
+        raise RuntimeError(f"No PDFs in {PDF_FOLDER}")
+    return files
 
-
-def _fingerprint(pdf_files: list[str]) -> dict:
+def _fingerprint(files: list[str]) -> dict:
     return {
-        "files": {
-            os.path.abspath(p): {"mtime": os.stat(p).st_mtime, "size": os.stat(p).st_size}
-            for p in sorted(pdf_files)
-        },
-        "embed_model": OLLAMA_EMBED_MODEL,
+        "files": {os.path.abspath(p): {"mtime": os.stat(p).st_mtime,
+                                        "size":  os.stat(p).st_size}
+                  for p in sorted(files)},
+        "embed_model": EMBED_MODEL,
         "chunk_size": CHUNK_SIZE,
         "chunk_overlap": CHUNK_OVERLAP,
     }
 
-
-def _needs_reindex(pdf_files: list[str]) -> bool:
-    if not os.path.isdir(CHROMA_DIR) or not os.path.isfile(INDEX_META_FILE):
+def _needs_reindex(files: list[str]) -> bool:
+    if not os.path.isdir(CHROMA_DIR) or not os.path.isfile(INDEX_META):
         return True
     try:
-        with open(INDEX_META_FILE, encoding="utf-8") as f:
-            return json.load(f) != _fingerprint(pdf_files)
+        return json.load(open(INDEX_META, encoding="utf-8")) != _fingerprint(files)
     except Exception:
         return True
 
-
 def load_and_index_pdfs(force: bool = False) -> Chroma:
-    """Load all PDFs from ./pdf, chunk, embed, and store in ChromaDB."""
-    pdf_files = _get_pdf_files()
-    embeddings = OllamaEmbeddings(model=OLLAMA_EMBED_MODEL)
+    files = _pdf_files()
+    embeddings = OllamaEmbeddings(model=EMBED_MODEL)
 
-    if not force and not _needs_reindex(pdf_files):
-        logger.info("Using cached embeddings from %s", CHROMA_DIR)
-        return Chroma(
-            collection_name=COLLECTION_NAME,
-            embedding_function=embeddings,
-            persist_directory=CHROMA_DIR,
-        )
+    if not force and not _needs_reindex(files):
+        logger.info("Using cached embeddings.")
+        return Chroma(collection_name=COLLECTION,
+                      embedding_function=embeddings,
+                      persist_directory=CHROMA_DIR)
 
-    logger.info("Indexing %d PDF(s)...", len(pdf_files))
+    logger.info("Indexing %d PDFs...", len(files))
     shutil.rmtree(CHROMA_DIR, ignore_errors=True)
     os.makedirs(CHROMA_DIR, exist_ok=True)
 
-    splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
-    all_chunks = []
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
+    chunks = []
+    for p in files:
+        docs = PyPDFLoader(p).load()
+        c = splitter.split_documents(docs)
+        chunks.extend(c)
+        logger.info("  %s → %d chunks", os.path.basename(p), len(c))
 
-    for pdf_path in pdf_files:
-        docs = PyPDFLoader(pdf_path).load()
-        chunks = splitter.split_documents(docs)
-        all_chunks.extend(chunks)
-        logger.info("  %s → %d chunks", os.path.basename(pdf_path), len(chunks))
-
-    vectorstore = Chroma.from_documents(
-        documents=all_chunks,
-        embedding=embeddings,
-        collection_name=COLLECTION_NAME,
-        persist_directory=CHROMA_DIR,
-    )
-
-    with open(INDEX_META_FILE, "w", encoding="utf-8") as f:
-        json.dump(_fingerprint(pdf_files), f, indent=2)
-
-    logger.info("Vector store ready. Total chunks: %d", len(all_chunks))
-    return vectorstore
-
-
-SYSTEM_PROMPT = """You are a smart company assistant. You have been given access to all the company's internal documents — these cover HR policies, code of conduct, IT & data security, health & safety, travel, communications, branding, and more.
-
-Behave as if the user has handed you all those PDFs directly in the chat. Use them to answer ANY company-related question — not just HR. If it's about the company, search for it.
-
-You have access to:
-1. document_retriever — searches ALL indexed company documents
-2. calculator — performs math calculations
-
-Decision rules:
-* If the question is about ANYTHING related to the company (policies, rules, procedures, benefits, roles, IT, travel, conduct, branding, safety, etc.) → call document_retriever FIRST, then answer.
-* If the question involves numbers or calculations → use calculator.
-* If it is casual conversation, a greeting, or completely unrelated to the company → answer naturally without using any tool.
-* Never make up information. If the documents don't contain the answer, say so clearly.
-* When you use document_retriever, always tell the user which document the answer came from."""
+    vs = Chroma.from_documents(documents=chunks, embedding=embeddings,
+                                collection_name=COLLECTION,
+                                persist_directory=CHROMA_DIR)
+    json.dump(_fingerprint(files), open(INDEX_META, "w", encoding="utf-8"), indent=2)
+    logger.info("Indexed %d total chunks.", len(chunks))
+    return vs
 
 
 # =============================================================================
-# AGENT FACTORY
+# AGENT — pure LangChain tool-calling chain
 # =============================================================================
 
-def build_agent(vectorstore: Chroma):
-    """Build a LangChain agent with document_retriever and calculator tools."""
-    retriever = vectorstore.as_retriever(
-        search_type="mmr",
-        search_kwargs={"k": MMR_K, "fetch_k": MMR_FETCH_K},
-    )
+class Agent:
+    """
+    Stateless LangChain tool-calling agent.
+    Conversation history is passed in on each call.
+    """
 
-    retriever_tool = create_retriever_tool(
-        retriever,
-        name="document_retriever",
-        description=(
-            "Search ALL company documents including HR policies, employee handbook, "
-            "code of conduct, IT and data security policy, health and safety, travel policy, "
-            "communications, branding guidelines, and any other company-specific information. "
-            "Use this tool for ANY question that might be answered by the company's documents."
-        ),
-        response_format="content_and_artifact",
-    )
+    def __init__(self, vectorstore: Chroma):
+        retriever = vectorstore.as_retriever(
+            search_type="mmr",
+            search_kwargs={"k": MMR_K, "fetch_k": MMR_FETCH_K},
+        )
+        self.retriever_tool = create_retriever_tool(
+            retriever,
+            name="document_retriever",
+            description=(
+                "Search ALL company documents: HR policies, employee handbook, "
+                "code of conduct, IT & data security, health & safety, travel, "
+                "communications, branding. Use for ANY company-related question."
+            ),
+        )
+        self.tools      = [self.retriever_tool, calculator]
+        self.tools_map  = {t.name: t for t in self.tools}
+        self.llm        = ChatGroq(
+            api_key=GROQ_API_KEY,
+            model=GROQ_LLM_MODEL,
+            temperature=0.2,
+        ).bind_tools(self.tools)
 
-    tools = [retriever_tool, calculator]
-    llm = ChatOllama(model=OLLAMA_LLM_MODEL, temperature=LLM_TEMPERATURE)
-    checkpointer = InMemorySaver()
+    def run(self, question: str, history: list[dict]) -> dict[str, Any]:
+        """Run one turn. history = list of {role, content} dicts."""
 
-    agent = create_agent(
-        model=llm,
-        tools=tools,
-        system_prompt=SYSTEM_PROMPT,
-        checkpointer=checkpointer,
-    )
+        # Build message list
+        messages: list = [SystemMessage(content=SYSTEM_PROMPT)]
+        for msg in history[-10:]:           # last 5 turns
+            if msg["role"] == "user":
+                messages.append(HumanMessage(content=msg["content"]))
+            elif msg["role"] == "assistant":
+                messages.append(AIMessage(content=msg["content"]))
+        messages.append(HumanMessage(content=question))
 
-    logger.info("Agent ready. Tools: %s", [t.name for t in tools])
+        tools_used: list[str] = []
+        sources:    list[str] = []
+
+        # Agentic loop — up to 5 iterations
+        for _ in range(5):
+            response: AIMessage = self.llm.invoke(messages)
+            messages.append(response)
+
+            if not response.tool_calls:
+                # No tool call → final answer
+                break
+
+            # Execute each tool call
+            for tc in response.tool_calls:
+                tool_name = tc["name"]
+                tool_args = tc["args"]
+
+                if tool_name not in tools_used:
+                    tools_used.append(tool_name)
+
+                tool_fn = self.tools_map.get(tool_name)
+                if tool_fn is None:
+                    result = f"Unknown tool: {tool_name}"
+                else:
+                    result = tool_fn.invoke(tool_args)
+
+                # Extract sources from retriever results
+                if tool_name == "document_retriever" and isinstance(result, str):
+                    # result is a formatted string of doc chunks
+                    for line in result.split("\n\n"):
+                        if "source" in line.lower() or ".pdf" in line.lower():
+                            for part in line.split():
+                                if ".pdf" in part.lower():
+                                    src = os.path.basename(part.strip("()[],'\""))
+                                    if src and src not in sources:
+                                        sources.append(src)
+
+                messages.append(ToolMessage(
+                    content=str(result),
+                    tool_call_id=tc["id"],
+                ))
+
+        # Extract final text reply
+        reply = ""
+        for msg in reversed(messages):
+            if isinstance(msg, AIMessage):
+                reply = msg.content if isinstance(msg.content, str) else \
+                    " ".join(b.get("text", "") for b in msg.content
+                             if isinstance(b, dict) and b.get("type") == "text")
+                if reply:
+                    break
+
+        return {
+            "reply":      reply or "I could not generate a response.",
+            "tools_used": tools_used,
+            "sources":    sources,
+        }
+
+
+def build_agent(vectorstore: Chroma) -> "Agent":
+    agent = Agent(vectorstore)
+    logger.info("Groq agent ready. Tools: %s", [t.name for t in agent.tools])
     return agent
 
 
-# =============================================================================
-# QUERY
-# =============================================================================
-
-def query_agent(agent, thread_id: str, question: str, history: list[dict]) -> dict[str, Any]:
-    """Run a question through the agent with conversation history via thread_id."""
-    config = {"configurable": {"thread_id": thread_id}}
-
-    prior_state = agent.get_state(config)
-    prior_count = len(prior_state.values.get("messages", []))
-
-    result = agent.invoke(
-        {"messages": [{"role": "user", "content": question}]},
-        config=config,
-    )
-
-    messages = result.get("messages", [])[prior_count:]
-    tools_used, sources, reply = [], [], ""
-
-    for msg in messages:
-        if isinstance(msg, AIMessage) and msg.tool_calls:
-            for tc in msg.tool_calls:
-                name = tc.get("name", "unknown")
-                if name not in tools_used:
-                    tools_used.append(name)
-
-        if isinstance(msg, ToolMessage) and msg.name == "document_retriever":
-            artifact = getattr(msg, "artifact", None)
-            if artifact:
-                for doc in artifact:
-                    src = os.path.basename(doc.metadata.get("source", "unknown"))
-                    page = doc.metadata.get("page", "?")
-                    entry = f"{src} (p.{page})"
-                    if entry not in sources:
-                        sources.append(entry)
-
-    for msg in reversed(messages):
-        if isinstance(msg, AIMessage) and msg.content:
-            reply = msg.content if isinstance(msg.content, str) else " ".join(
-                b.get("text", "") for b in msg.content if isinstance(b, dict)
-            )
-            if reply:
-                break
-
-    return {
-        "reply": reply or "I could not generate a response.",
-        "tools_used": tools_used,
-        "sources": sources,
-    }
+def query_agent(agent: "Agent", thread_id: str,
+                question: str, history: list[dict]) -> dict[str, Any]:
+    return agent.run(question, history)
