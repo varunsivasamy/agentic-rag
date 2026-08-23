@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import "./App.css";
-import { Message, ChatResponse } from "./types";
+import type { Message, ChatResponse } from "./types";
 import Header from "./components/Header";
 import MessageBubble from "./components/MessageBubble";
 import TypingIndicator from "./components/TypingIndicator";
