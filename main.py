@@ -1,26 +1,17 @@
 """
-FastAPI backend for the Employee Handbook RAG chatbot.
-
-Endpoints:
-  GET  /              — Serve the frontend HTML
-  POST /chat          — Send a message, get a response
-  GET  /history/{id}  — Retrieve conversation history by session ID
-  DELETE /history/{id}— Clear conversation history for a session
-  GET  /status        — Health check / model info
+FastAPI backend — connects React frontend to the LangChain agent.
+Conversation history is persisted in SQLite (chat_history.db).
 """
 
+import json
 import logging
+import sqlite3
 import uuid
-from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
-from fastapi import Request
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from rag_engine import load_and_index_pdfs, build_agent, query_agent
@@ -31,44 +22,104 @@ logging.basicConfig(
 )
 logger = logging.getLogger("main")
 
+DB_PATH = "chat_history.db"
+
+# =============================================================================
+# SQLite — conversation history store
+# =============================================================================
+
+def init_db():
+    """Create the messages table if it doesn't exist."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS messages (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role      TEXT NOT NULL,
+                content   TEXT NOT NULL,
+                sources   TEXT NOT NULL DEFAULT '[]',
+                timestamp TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+    logger.info("SQLite DB ready at %s", DB_PATH)
+
+
+def db_save_message(session_id: str, role: str, content: str,
+                    sources: list[str], timestamp: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, sources, timestamp) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (session_id, role, content, json.dumps(sources), timestamp),
+        )
+        conn.commit()
+
+
+def db_get_history(session_id: str) -> list[dict]:
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT role, content, sources, timestamp FROM messages "
+            "WHERE session_id = ? ORDER BY id ASC",
+            (session_id,),
+        ).fetchall()
+    return [
+        {"role": r[0], "content": r[1],
+         "sources": json.loads(r[2]), "timestamp": r[3]}
+        for r in rows
+    ]
+
+
+def db_delete_history(session_id: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+        conn.commit()
+
+
+def db_active_sessions() -> int:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT COUNT(DISTINCT session_id) FROM messages"
+        ).fetchone()
+    return row[0] if row else 0
+
 
 # =============================================================================
 # APP STATE
 # =============================================================================
 
-# Conversation history: { session_id: [ {role, content, sources, timestamp} ] }
-conversation_store: dict[str, list[dict]] = defaultdict(list)
-
-agent = None  # Shared agent instance (InMemorySaver handles per-thread memory)
+agent_executor = None
 
 
 # =============================================================================
-# LIFESPAN — load PDFs and build agent on startup
+# LIFESPAN
 # =============================================================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global agent
+    global agent_executor
+    init_db()
     logger.info("Loading PDFs and building agent...")
     vectorstore = load_and_index_pdfs()
-    agent = build_agent(vectorstore)
+    agent_executor = build_agent(vectorstore)
     logger.info("Agent ready.")
     yield
     logger.info("Shutting down.")
 
 
 # =============================================================================
-# FASTAPI APP
+# APP
 # =============================================================================
 
-app = FastAPI(
-    title="Employee Handbook Assistant",
-    description="Ask questions about company policies, benefits, and more.",
-    version="1.0.0",
-    lifespan=lifespan,
-)
+app = FastAPI(title="Company Assistant", version="1.0.0", lifespan=lifespan)
 
-templates = Jinja2Templates(directory="templates")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # =============================================================================
@@ -76,9 +127,8 @@ templates = Jinja2Templates(directory="templates")
 # =============================================================================
 
 class ChatRequest(BaseModel):
-    session_id: str | None = None  # If None, a new session is created
+    session_id: str | None = None
     message: str
-
 
 class ChatResponse(BaseModel):
     session_id: str
@@ -87,13 +137,11 @@ class ChatResponse(BaseModel):
     tools_used: list[str]
     timestamp: str
 
-
 class HistoryItem(BaseModel):
     role: str
     content: str
     sources: list[str] = []
     timestamp: str
-
 
 class HistoryResponse(BaseModel):
     session_id: str
@@ -104,81 +152,68 @@ class HistoryResponse(BaseModel):
 # ROUTES
 # =============================================================================
 
-@app.get("/", response_class=HTMLResponse)
-async def root(request: Request):
-    """Serve the chat frontend."""
-    return templates.TemplateResponse("index.html", {"request": request})
-
-
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
-    """Handle a chat message and return the agent's response."""
-    if agent is None:
-        raise HTTPException(status_code=503, detail="Agent not ready. Try again shortly.")
+    if agent_executor is None:
+        raise HTTPException(status_code=503, detail="Agent not ready yet.")
 
-    # Create new session if not provided
     session_id = req.session_id or str(uuid.uuid4())
     timestamp = datetime.utcnow().isoformat()
 
-    # Store user message
-    conversation_store[session_id].append({
-        "role": "user",
-        "content": req.message,
-        "sources": [],
-        "timestamp": timestamp,
-    })
+    # Save user message to DB
+    db_save_message(session_id, "user", req.message, [], timestamp)
+
+    # Load full history for context (exclude the message we just saved)
+    history = db_get_history(session_id)[:-1]
 
     try:
-        result = query_agent(agent, session_id, req.message)
+        result = query_agent(
+            agent=agent_executor,
+            thread_id=session_id,
+            question=req.message,
+            history=history,
+        )
     except Exception as exc:
         logger.exception("Agent error for session %s", session_id)
         raise HTTPException(status_code=500, detail=f"Agent error: {exc}")
 
-    reply_timestamp = datetime.utcnow().isoformat()
+    reply_ts = datetime.utcnow().isoformat()
 
-    # Store assistant response
-    conversation_store[session_id].append({
-        "role": "assistant",
-        "content": result["reply"],
-        "sources": result["sources"],
-        "timestamp": reply_timestamp,
-    })
+    # Save assistant reply to DB
+    db_save_message(session_id, "assistant", result["reply"], result["sources"], reply_ts)
 
     return ChatResponse(
         session_id=session_id,
         reply=result["reply"],
         sources=result["sources"],
         tools_used=result["tools_used"],
-        timestamp=reply_timestamp,
+        timestamp=reply_ts,
     )
 
 
 @app.get("/history/{session_id}", response_model=HistoryResponse)
 async def get_history(session_id: str):
-    """Return full conversation history for a session."""
-    if session_id not in conversation_store:
+    messages = db_get_history(session_id)
+    if not messages:
         raise HTTPException(status_code=404, detail="Session not found.")
     return HistoryResponse(
         session_id=session_id,
-        messages=[HistoryItem(**m) for m in conversation_store[session_id]],
+        messages=[HistoryItem(**m) for m in messages],
     )
 
 
 @app.delete("/history/{session_id}")
 async def clear_history(session_id: str):
-    """Clear conversation history for a session."""
-    if session_id in conversation_store:
-        del conversation_store[session_id]
-    return {"message": f"History cleared for session {session_id}"}
+    db_delete_history(session_id)
+    return {"message": f"Session {session_id} cleared."}
 
 
 @app.get("/status")
 async def status():
-    """Health check and model info."""
     return {
-        "status": "ready" if agent is not None else "loading",
+        "status": "ready" if agent_executor is not None else "loading",
         "llm_model": "qwen2.5:1.5b",
         "embed_model": "nomic-embed-text",
-        "pdf_folder": "./pdf",
-        "active_sessions": len(conversation_store),
+        "active_sessions": db_active_sessions(),
+        "history_db": DB_PATH,
     }
