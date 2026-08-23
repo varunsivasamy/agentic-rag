@@ -7,7 +7,7 @@ import TypingIndicator from "./components/TypingIndicator";
 import WelcomeScreen from "./components/WelcomeScreen";
 import InputBar from "./components/InputBar";
 
-const API = "http://localhost:8000";
+const API = "";  // Vite proxy forwards /chat, /history, /status → FastAPI:8000
 
 export default function App() {
   const [messages, setMessages]   = useState<Message[]>([]);
