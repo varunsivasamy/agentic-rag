@@ -1,29 +1,40 @@
 # Employee Handbook Assistant
 
-An agentic RAG application that extracts and answers questions from private company data — the **Company Employee Handbook** — using LangChain, ChromaDB, and Hugging Face models.
+A FastAPI-based RAG chatbot that answers questions from private company PDF documents using LangChain, ChromaDB, and Ollama.
 
 ## Features
 
-- **Private data extraction** — Queries internal company handbook, not a generic chatbot.
-- **Agentic workflow** — The LLM decides when to retrieve document context vs. run calculations.
-- **Grounded answers** — Responses are strictly based on handbook content; no hallucination.
-- **Conversation memory** — Multi-turn chat with in-session memory.
-- **MMR retrieval** — Maximal Marginal Relevance search for diverse, relevant chunks.
+- **Private data extraction** — Indexes all PDFs in the `./pdf` folder automatically on startup
+- **FastAPI backend** — REST API with endpoints for chat and conversation history
+- **Conversation history** — Full per-session history stored server-side
+- **Agentic workflow** — LLM decides when to retrieve docs vs. calculate
+- **Clean frontend** — Single-page chat UI served directly by FastAPI
+- **Source attribution** — Every answer shows which document and page it came from
+- **No file uploads** — PDFs are pre-loaded from the server folder
 
-## How it works
+## Project Structure
 
 ```
-Company_Employee_Handbook.pdf  →  chunk & embed  →  ChromaDB
-                                                          ↓
-User question  →  LangChain agent  →  document_retriever / calculator  →  answer
+agentic-rag/
+├── main.py              # FastAPI app — routes and conversation store
+├── rag_engine.py        # PDF ingestion, ChromaDB, LangChain agent
+├── templates/
+│   └── index.html       # Chat frontend
+├── pdf/                 # Place company PDFs here
+├── chroma_db/           # Auto-generated vector store (gitignored)
+├── requirements.txt
+└── README.md
 ```
-
-The handbook is indexed on startup. Users can immediately ask about policies, benefits, leave rules, and more.
 
 ## Prerequisites
 
-- Python 3.10+
-- `Company_Employee_Handbook.pdf` placed in the project folder
+1. Python 3.10+
+2. [Ollama](https://ollama.com/) running locally with models pulled:
+
+```bash
+ollama pull qwen2.5:1.5b
+ollama pull nomic-embed-text
+```
 
 ## Installation
 
@@ -41,25 +52,43 @@ pip install -r requirements.txt
 ## Usage
 
 ```bash
-python app.py
+uvicorn main:app --reload
 ```
 
-The handbook loads automatically on startup. Ask questions like:
+Open `http://localhost:8000` in your browser.
 
-- *What is the leave policy?*
-- *What are the employee benefits?*
-- *What is the code of conduct?*
+## API Endpoints
 
-## Project structure
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/` | Chat frontend |
+| `POST` | `/chat` | Send a message |
+| `GET` | `/history/{session_id}` | Get conversation history |
+| `DELETE` | `/history/{session_id}` | Clear conversation history |
+| `GET` | `/status` | Health check |
 
+### Example `/chat` request
+
+```json
+POST /chat
+{
+  "session_id": "abc-123",   // omit to start a new session
+  "message": "What is the leave policy?"
+}
 ```
-agentic-rag/
-├── app.py                        # Main application
-├── Company_Employee_Handbook.pdf # Private company data source
-├── chroma_db/                    # Cached embeddings (gitignored)
-└── README.md
+
+### Example response
+
+```json
+{
+  "session_id": "abc-123",
+  "reply": "Employees are entitled to 20 days of annual leave...",
+  "sources": ["01_HR_Employment_Policy.pdf (p.3)"],
+  "tools_used": ["document_retriever"],
+  "timestamp": "2026-08-23T12:00:00"
+}
 ```
 
-## License
+## Adding More Documents
 
-This project is provided as-is for learning and experimentation.
+Drop any PDF into the `./pdf` folder and restart the server. The index rebuilds automatically when new files are detected.

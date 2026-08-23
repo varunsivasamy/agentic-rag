@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Employee Handbook Assistant</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f0f2f5;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 800px;
+      height: 92vh;
+      background: #fff;
+      border-radius: 16px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.10);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* Header */
+    .header {
+      background: #1a1a2e;
+      color: #fff;
+      padding: 18px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .header h1 { font-size: 1.1rem; font-weight: 600; }
+    .header p  { font-size: 0.78rem; opacity: 0.7; margin-top: 2px; }
+    .status-dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: #ccc;
+      display: inline-block;
+      margin-right: 6px;
+    }
+    .status-dot.ready { background: #4caf50; }
+
+    /* Messages */
+    .messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .message {
+      display: flex;
+      flex-direction: column;
+      max-width: 78%;
+    }
+    .message.user  { align-self: flex-end; align-items: flex-end; }
+    .message.assistant { align-self: flex-start; }
+
+    .bubble {
+      padding: 12px 16px;
+      border-radius: 16px;
+      font-size: 0.92rem;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .message.user .bubble {
+      background: #1a1a2e;
+      color: #fff;
+      border-bottom-right-radius: 4px;
+    }
+    .message.assistant .bubble {
+      background: #f1f3f6;
+      color: #1a1a2e;
+      border-bottom-left-radius: 4px;
+    }
+
+    .sources {
+      margin-top: 5px;
+      font-size: 0.75rem;
+      color: #777;
+    }
+    .sources span {
+      background: #e8eaf6;
+      color: #3949ab;
+      padding: 2px 8px;
+      border-radius: 12px;
+      margin-right: 4px;
+      display: inline-block;
+      margin-top: 3px;
+    }
+
+    .timestamp {
+      font-size: 0.68rem;
+      color: #bbb;
+      margin-top: 3px;
+    }
+
+    /* Typing indicator */
+    .typing .bubble {
+      display: flex;
+      gap: 5px;
+      align-items: center;
+      padding: 14px 18px;
+    }
+    .dot {
+      width: 7px; height: 7px;
+      background: #999;
+      border-radius: 50%;
+      animation: bounce 1.2s infinite;
+    }
+    .dot:nth-child(2) { animation-delay: 0.2s; }
+    .dot:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes bounce {
+      0%, 60%, 100% { transform: translateY(0); }
+      30% { transform: translateY(-6px); }
+    }
+
+    /* Input area */
+    .input-area {
+      padding: 14px 20px;
+      border-top: 1px solid #eee;
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+      background: #fff;
+    }
+    textarea {
+      flex: 1;
+      resize: none;
+      border: 1.5px solid #ddd;
+      border-radius: 12px;
+      padding: 10px 14px;
+      font-size: 0.92rem;
+      font-family: inherit;
+      outline: none;
+      max-height: 120px;
+      transition: border 0.2s;
+    }
+    textarea:focus { border-color: #1a1a2e; }
+
+    button {
+      background: #1a1a2e;
+      color: #fff;
+      border: none;
+      border-radius: 12px;
+      padding: 10px 20px;
+      font-size: 0.92rem;
+      cursor: pointer;
+      transition: background 0.2s;
+      white-space: nowrap;
+    }
+    button:hover { background: #2d2d5e; }
+    button:disabled { background: #ccc; cursor: not-allowed; }
+
+    #clearBtn {
+      background: transparent;
+      color: #888;
+      border: 1.5px solid #ddd;
+      padding: 10px 14px;
+      font-size: 0.82rem;
+    }
+    #clearBtn:hover { background: #f5f5f5; color: #333; }
+
+    /* Welcome */
+    .welcome {
+      text-align: center;
+      color: #aaa;
+      margin: auto;
+      padding: 40px 20px;
+    }
+    .welcome h2 { font-size: 1.1rem; color: #555; margin-bottom: 8px; }
+    .welcome p  { font-size: 0.85rem; }
+
+    .suggestions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: center;
+      margin-top: 18px;
+    }
+    .suggestion {
+      background: #f1f3f6;
+      color: #3949ab;
+      border: none;
+      border-radius: 20px;
+      padding: 7px 14px;
+      font-size: 0.82rem;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .suggestion:hover { background: #e8eaf6; }
+
+    /* Scrollbar */
+    .messages::-webkit-scrollbar { width: 5px; }
+    .messages::-webkit-scrollbar-thumb { background: #ddd; border-radius: 4px; }
+  </style>
+</head>
+<body>
+
+<div class="container">
+
+  <!-- Header -->
+  <div class="header">
+    <div>
+      <h1>🏢 Employee Handbook Assistant</h1>
+      <p>Ask about company policies, benefits, leave, and more</p>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <span class="status-dot" id="statusDot"></span>
+      <span style="font-size:0.78rem;opacity:0.8" id="statusText">Connecting...</span>
+    </div>
+  </div>
+
+  <!-- Messages -->
+  <div class="messages" id="messages">
+    <div class="welcome" id="welcome">
+      <h2>How can I help you today?</h2>
+      <p>I have access to all company policy documents. Ask me anything.</p>
+      <div class="suggestions">
+        <button class="suggestion" onclick="sendSuggestion(this)">What is the leave policy?</button>
+        <button class="suggestion" onclick="sendSuggestion(this)">What are the employee benefits?</button>
+        <button class="suggestion" onclick="sendSuggestion(this)">What is the code of conduct?</button>
+        <button class="suggestion" onclick="sendSuggestion(this)">How many annual leave days do I get?</button>
+        <button class="suggestion" onclick="sendSuggestion(this)">What is the IT security policy?</button>
+        <button class="suggestion" onclick="sendSuggestion(this)">Explain the travel policy</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Input -->
+  <div class="input-area">
+    <button id="clearBtn" onclick="clearChat()">Clear</button>
+    <textarea
+      id="input"
+      placeholder="Ask about company policies..."
+      rows="1"
+      onkeydown="handleKey(event)"
+      oninput="autoResize(this)"
+    ></textarea>
+    <button id="sendBtn" onclick="sendMessage()">Send</button>
+  </div>
+
+</div>
+
+<script>
+  let sessionId = null;
+  let isLoading = false;
+
+  // Check status on load
+  async function checkStatus() {
+    try {
+      const res = await fetch("/status");
+      const data = await res.json();
+      const dot  = document.getElementById("statusDot");
+      const text = document.getElementById("statusText");
+      if (data.status === "ready") {
+        dot.classList.add("ready");
+        text.textContent = "Ready";
+      } else {
+        text.textContent = "Loading...";
+        setTimeout(checkStatus, 2000);
+      }
+    } catch {
+      setTimeout(checkStatus, 3000);
+    }
+  }
+
+  checkStatus();
+
+  function autoResize(el) {
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 120) + "px";
+  }
+
+  function handleKey(e) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  }
+
+  function sendSuggestion(btn) {
+    document.getElementById("input").value = btn.textContent;
+    sendMessage();
+  }
+
+  function formatTime(iso) {
+    const d = new Date(iso);
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+
+  function appendMessage(role, content, sources = [], timestamp = null) {
+    const welcome = document.getElementById("welcome");
+    if (welcome) welcome.remove();
+
+    const messages = document.getElementById("messages");
+
+    const wrapper = document.createElement("div");
+    wrapper.className = `message ${role}`;
+
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    bubble.textContent = content;
+    wrapper.appendChild(bubble);
+
+    if (sources && sources.length > 0) {
+      const srcDiv = document.createElement("div");
+      srcDiv.className = "sources";
+      sources.forEach(s => {
+        const tag = document.createElement("span");
+        tag.textContent = "📄 " + s;
+        srcDiv.appendChild(tag);
+      });
+      wrapper.appendChild(srcDiv);
+    }
+
+    if (timestamp) {
+      const ts = document.createElement("div");
+      ts.className = "timestamp";
+      ts.textContent = formatTime(timestamp);
+      wrapper.appendChild(ts);
+    }
+
+    messages.appendChild(wrapper);
+    messages.scrollTop = messages.scrollHeight;
+    return wrapper;
+  }
+
+  function showTyping() {
+    const messages = document.getElementById("messages");
+    const wrapper = document.createElement("div");
+    wrapper.className = "message assistant typing";
+    wrapper.id = "typing";
+    wrapper.innerHTML = `<div class="bubble"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
+    messages.appendChild(wrapper);
+    messages.scrollTop = messages.scrollHeight;
+  }
+
+  function removeTyping() {
+    const t = document.getElementById("typing");
+    if (t) t.remove();
+  }
+
+  async function sendMessage() {
+    const input = document.getElementById("input");
+    const message = input.value.trim();
+    if (!message || isLoading) return;
+
+    isLoading = true;
+    document.getElementById("sendBtn").disabled = true;
+    input.value = "";
+    input.style.height = "auto";
+
+    appendMessage("user", message, [], new Date().toISOString());
+    showTyping();
+
+    try {
+      const res = await fetch("/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sessionId, message }),
+      });
+
+      const data = await res.json();
+      removeTyping();
+
+      if (!res.ok) {
+        appendMessage("assistant", "Error: " + (data.detail || "Something went wrong."));
+      } else {
+        sessionId = data.session_id;
+        appendMessage("assistant", data.reply, data.sources, data.timestamp);
+      }
+    } catch (err) {
+      removeTyping();
+      appendMessage("assistant", "Network error. Is the server running?");
+    }
+
+    isLoading = false;
+    document.getElementById("sendBtn").disabled = false;
+    input.focus();
+  }
+
+  async function clearChat() {
+    if (sessionId) {
+      await fetch(`/history/${sessionId}`, { method: "DELETE" });
+      sessionId = null;
+    }
+
+    const messages = document.getElementById("messages");
+    messages.innerHTML = `
+      <div class="welcome" id="welcome">
+        <h2>How can I help you today?</h2>
+        <p>I have access to all company policy documents. Ask me anything.</p>
+        <div class="suggestions">
+          <button class="suggestion" onclick="sendSuggestion(this)">What is the leave policy?</button>
+          <button class="suggestion" onclick="sendSuggestion(this)">What are the employee benefits?</button>
+          <button class="suggestion" onclick="sendSuggestion(this)">What is the code of conduct?</button>
+          <button class="suggestion" onclick="sendSuggestion(this)">How many annual leave days do I get?</button>
+          <button class="suggestion" onclick="sendSuggestion(this)">What is the IT security policy?</button>
+          <button class="suggestion" onclick="sendSuggestion(this)">Explain the travel policy</button>
+        </div>
+      </div>`;
+  }
+</script>
+
+</body>
+</html>
