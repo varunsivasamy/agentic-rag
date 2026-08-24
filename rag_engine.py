@@ -208,7 +208,7 @@ class Agent:
             messages.append(response)
 
             if not response.tool_calls:
-                # No tool call → final answer
+                # No tool call → this is the final answer
                 break
 
             # Execute each tool call
@@ -220,36 +220,44 @@ class Agent:
                     tools_used.append(tool_name)
 
                 tool_fn = self.tools_map.get(tool_name)
-                if tool_fn is None:
-                    result = f"Unknown tool: {tool_name}"
-                else:
-                    result = tool_fn.invoke(tool_args)
+                result  = tool_fn.invoke(tool_args) if tool_fn else f"Unknown tool: {tool_name}"
 
-                # Extract sources from retriever results
+                # Extract source filenames
                 if tool_name == "document_retriever" and isinstance(result, str):
-                    # result is a formatted string of doc chunks
                     for line in result.split("\n\n"):
-                        if "source" in line.lower() or ".pdf" in line.lower():
-                            for part in line.split():
-                                if ".pdf" in part.lower():
-                                    src = os.path.basename(part.strip("()[],'\""))
-                                    if src and src not in sources:
-                                        sources.append(src)
+                        for part in line.split():
+                            if ".pdf" in part.lower():
+                                src = os.path.basename(part.strip("()[],'\""))
+                                if src and src not in sources:
+                                    sources.append(src)
 
                 messages.append(ToolMessage(
                     content=str(result),
                     tool_call_id=tc["id"],
                 ))
 
-        # Extract final text reply — skip AIMessages that only contain tool calls
+        # Extract reply — walk backwards, skip messages that have tool calls or are empty
         reply = ""
         for msg in reversed(messages):
-            if isinstance(msg, AIMessage) and not msg.tool_calls and msg.content:
-                reply = msg.content if isinstance(msg.content, str) else \
-                    " ".join(b.get("text", "") for b in msg.content
-                             if isinstance(b, dict) and b.get("type") == "text")
-                if reply.strip():
-                    break
+            if not isinstance(msg, AIMessage):
+                continue
+            if msg.tool_calls:
+                continue
+            content = msg.content
+            if isinstance(content, list):
+                content = " ".join(
+                    b.get("text", "") for b in content
+                    if isinstance(b, dict) and b.get("type") == "text"
+                )
+            if content and content.strip():
+                reply = content.strip()
+                break
+
+        return {
+            "reply":      reply or "I could not generate a response.",
+            "tools_used": tools_used,
+            "sources":    sources,
+        }
 
         return {
             "reply":      reply or "I could not generate a response.",
