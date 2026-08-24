@@ -34,7 +34,7 @@ load_dotenv()  # loads GROQ_API_KEY from .env
 # =============================================================================
 
 GROQ_API_KEY   = os.environ["GROQ_API_KEY"]
-GROQ_LLM_MODEL = "llama3-70b-8192"
+GROQ_LLM_MODEL = "qwen/qwen3.6-27b"  # supports tool calling on this account
 
 EMBED_MODEL  = "nomic-embed-text"     # still local via Ollama
 CHUNK_SIZE   = 1000
@@ -184,8 +184,9 @@ class Agent:
         self.llm        = ChatGroq(
             api_key=GROQ_API_KEY,
             model=GROQ_LLM_MODEL,
-            temperature=0.2,
-        ).bind_tools(self.tools)
+            temperature=0,
+            model_kwargs={"thinking": {"type": "disabled"}},
+        ).bind_tools(self.tools, tool_choice="auto")
 
     def run(self, question: str, history: list[dict]) -> dict[str, Any]:
         """Run one turn. history = list of {role, content} dicts."""
