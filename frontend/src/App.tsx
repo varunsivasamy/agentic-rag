@@ -7,7 +7,8 @@ import TypingIndicator from "./components/TypingIndicator";
 import WelcomeScreen from "./components/WelcomeScreen";
 import InputBar from "./components/InputBar";
 
-const API = "";  // Vite proxy forwards /chat, /history, /status → FastAPI:8000
+// Vite proxy forwards /chat /history /status → FastAPI at localhost:8000
+const API = "";
 
 export default function App() {
   const [messages, setMessages]   = useState<Message[]>([]);
@@ -17,31 +18,46 @@ export default function App() {
   const [ready, setReady]         = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  // Poll backend until agent is ready
+  // Poll /status until backend agent is ready
   useEffect(() => {
+    let cancelled = false;
     const check = async () => {
       try {
-        const res  = await fetch(`${API}/status`);
+        const res = await fetch(`${API}/status`);
+        if (!res.ok) { if (!cancelled) setTimeout(check, 2000); return; }
         const data = await res.json();
+        if (cancelled) return;
         data.status === "ready" ? setReady(true) : setTimeout(check, 2000);
       } catch {
-        setTimeout(check, 3000);
+        if (!cancelled) setTimeout(check, 3000);
       }
     };
     check();
+    return () => { cancelled = true; };
   }, []);
 
-  // Scroll to bottom on new messages
+  // Auto-scroll on new messages
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
+
+  // Safe JSON parse — never throws on empty/bad body
+  const safeJson = async (res: Response): Promise<any> => {
+    const text = await res.text();
+    if (!text || !text.trim()) return {};
+    try { return JSON.parse(text); }
+    catch { return { detail: `Server returned invalid response (status ${res.status})` }; }
+  };
 
   const sendMessage = async (text?: string) => {
     const message = (text ?? input).trim();
     if (!message || loading) return;
 
     setInput("");
-    setMessages((prev) => [...prev, { role: "user", content: message, timestamp: new Date().toISOString() }]);
+    setMessages((prev) => [
+      ...prev,
+      { role: "user", content: message, timestamp: new Date().toISOString() },
+    ]);
     setLoading(true);
 
     try {
@@ -50,27 +66,34 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ session_id: sessionId, message }),
       });
-      const data: ChatResponse = await res.json();
 
-      if (!res.ok) throw new Error((data as any).detail || "Server error");
+      const data = await safeJson(res);
 
-      setSessionId(data.session_id);
+      if (!res.ok) {
+        throw new Error(data?.detail || `Server error (${res.status})`);
+      }
+
+      const chatData = data as ChatResponse;
+      setSessionId(chatData.session_id);
       setMessages((prev) => [
         ...prev,
         {
           role: "assistant",
-          content: data.reply,
-          sources: data.sources,
-          tools_used: data.tools_used,
-          timestamp: data.timestamp,
+          content: chatData.reply || "No response received.",
+          sources:    chatData.sources    ?? [],
+          tools_used: chatData.tools_used ?? [],
+          timestamp:  chatData.timestamp  ?? new Date().toISOString(),
         },
       ]);
     } catch (err: any) {
-      setMessages((prev) => [...prev, {
-        role: "assistant",
-        content: `Error: ${err.message}`,
-        timestamp: new Date().toISOString(),
-      }]);
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: `⚠️ ${err.message}`,
+          timestamp: new Date().toISOString(),
+        },
+      ]);
     } finally {
       setLoading(false);
     }
@@ -78,7 +101,9 @@ export default function App() {
 
   const clearChat = async () => {
     if (sessionId) {
-      await fetch(`${API}/history/${sessionId}`, { method: "DELETE" });
+      try {
+        await fetch(`${API}/history/${sessionId}`, { method: "DELETE" });
+      } catch { /* ignore */ }
       setSessionId(null);
     }
     setMessages([]);
