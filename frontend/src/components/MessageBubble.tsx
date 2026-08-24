@@ -1,3 +1,4 @@
+import ReactMarkdown from "react-markdown";
 import type { Message } from "../types";
 
 interface Props {
@@ -9,7 +10,13 @@ export default function MessageBubble({ message }: Props) {
 
   return (
     <div className={`message ${role}`}>
-      <div className="bubble">{content}</div>
+      <div className="bubble">
+        {role === "assistant" ? (
+          <ReactMarkdown>{content}</ReactMarkdown>
+        ) : (
+          content
+        )}
+      </div>
 
       {sources && sources.length > 0 && (
         <div className="sources">

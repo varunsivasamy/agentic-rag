@@ -34,7 +34,7 @@ load_dotenv()  # loads GROQ_API_KEY from .env
 # =============================================================================
 
 GROQ_API_KEY   = os.environ["GROQ_API_KEY"]
-GROQ_LLM_MODEL = "qwen/qwen3.6-27b"  # supports tool calling on this account
+GROQ_LLM_MODEL = "openai/gpt-oss-120b"  # reliable tool-calling on this account
 
 EMBED_MODEL  = "nomic-embed-text"     # still local via Ollama
 CHUNK_SIZE   = 1000
@@ -46,20 +46,16 @@ PDF_FOLDER   = "./pdf"
 MMR_K        = 5
 MMR_FETCH_K  = 20
 
-SYSTEM_PROMPT = """You are a knowledgeable company assistant. You have been given access to all the company's internal documents — HR policies, code of conduct, IT & data security, health & safety, travel, communications, branding, and more.
+SYSTEM_PROMPT = """You are a company assistant with access to all internal company documents.
 
-Treat the documents as if the user handed them to you directly. Use them to answer ANY company-related question.
+When answering questions about company policies or information:
+- Be concise and direct — 3 to 6 bullet points maximum
+- Only include what is explicitly stated in the retrieved documents
+- Do not add generic advice, filler, or content not in the documents
+- End with one line stating the source document name
+- If the document does not contain the answer, say so in one sentence
 
-You have two tools:
-1. document_retriever — searches ALL company documents. Use for any company or policy question.
-2. calculator — math calculations.
-
-Rules:
-- Company question? → call document_retriever first, then answer using the retrieved content.
-- Math? → use calculator.
-- Casual chat / greeting? → answer directly, no tool needed.
-- Never make up company information. If the docs don't contain it, say so.
-- Always tell the user which document your answer came from."""
+For casual conversation, reply naturally in one or two sentences. No tools needed."""
 
 
 # =============================================================================
@@ -192,7 +188,7 @@ class Agent:
 
         # Build message list
         messages: list = [SystemMessage(content=SYSTEM_PROMPT)]
-        for msg in history[-10:]:           # last 5 turns
+        for msg in history[-10:]:
             if msg["role"] == "user":
                 messages.append(HumanMessage(content=msg["content"]))
             elif msg["role"] == "assistant":
@@ -208,10 +204,8 @@ class Agent:
             messages.append(response)
 
             if not response.tool_calls:
-                # No tool call → this is the final answer
                 break
 
-            # Execute each tool call
             for tc in response.tool_calls:
                 tool_name = tc["name"]
                 tool_args = tc["args"]
@@ -222,7 +216,6 @@ class Agent:
                 tool_fn = self.tools_map.get(tool_name)
                 result  = tool_fn.invoke(tool_args) if tool_fn else f"Unknown tool: {tool_name}"
 
-                # Extract source filenames
                 if tool_name == "document_retriever" and isinstance(result, str):
                     for line in result.split("\n\n"):
                         for part in line.split():
@@ -236,31 +229,39 @@ class Agent:
                     tool_call_id=tc["id"],
                 ))
 
-        # Extract reply — walk backwards, skip messages that have tool calls or are empty
+        # Extract reply — skip AIMessages that only contain tool calls
+        def _extract_content(msg: AIMessage) -> str:
+            c = msg.content
+            if isinstance(c, list):
+                c = " ".join(b.get("text", "") for b in c
+                             if isinstance(b, dict) and b.get("type") == "text")
+            c = (c or "").strip()
+            # Strip <think>...</think> reasoning blocks (some models include these)
+            import re
+            c = re.sub(r"<think>.*?</think>", "", c, flags=re.DOTALL).strip()
+            return c
+
         reply = ""
         for msg in reversed(messages):
-            if not isinstance(msg, AIMessage):
-                continue
-            if msg.tool_calls:
-                continue
-            content = msg.content
-            if isinstance(content, list):
-                content = " ".join(
-                    b.get("text", "") for b in content
-                    if isinstance(b, dict) and b.get("type") == "text"
-                )
-            if content and content.strip():
-                reply = content.strip()
-                break
+            if isinstance(msg, AIMessage) and not msg.tool_calls:
+                reply = _extract_content(msg)
+                if reply:
+                    break
+
+        # Fallback: qwen3 sometimes returns empty string after tool results.
+        # Ask the plain LLM (no tools bound) to summarize the retrieved content.
+        if not reply and tools_used:
+            logger.info("Empty reply after tool use — invoking fallback summary call.")
+            # Get the base LLM without tools bound
+            base_llm = self.llm.bound if hasattr(self.llm, "bound") else self.llm
+            messages.append(HumanMessage(
+                content="Using ONLY the information retrieved above, provide a clear and complete answer to my original question."
+            ))
+            fallback = base_llm.invoke(messages)
+            reply = _extract_content(fallback)
 
         return {
-            "reply":      reply or "I could not generate a response.",
-            "tools_used": tools_used,
-            "sources":    sources,
-        }
-
-        return {
-            "reply":      reply or "I could not generate a response.",
+            "reply":      reply or "Sorry, I could not find relevant information.",
             "tools_used": tools_used,
             "sources":    sources,
         }
