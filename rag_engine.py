@@ -241,14 +241,14 @@ class Agent:
                     tool_call_id=tc["id"],
                 ))
 
-        # Extract final text reply
+        # Extract final text reply — skip AIMessages that only contain tool calls
         reply = ""
         for msg in reversed(messages):
-            if isinstance(msg, AIMessage):
+            if isinstance(msg, AIMessage) and not msg.tool_calls and msg.content:
                 reply = msg.content if isinstance(msg.content, str) else \
                     " ".join(b.get("text", "") for b in msg.content
                              if isinstance(b, dict) and b.get("type") == "text")
-                if reply:
+                if reply.strip():
                     break
 
         return {
