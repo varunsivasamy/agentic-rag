@@ -185,7 +185,6 @@ class Agent:
             api_key=GROQ_API_KEY,
             model=GROQ_LLM_MODEL,
             temperature=0,
-            model_kwargs={"thinking": {"type": "disabled"}},
         ).bind_tools(self.tools, tool_choice="auto")
 
     def run(self, question: str, history: list[dict]) -> dict[str, Any]:
